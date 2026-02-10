@@ -5,7 +5,10 @@ edition = "2021"
 
 [dependencies]
 # The key dependency - same helpers the toolkit uses
-midnight-node-ledger-helpers = { path = "../../midnight-node/ledger/helpers", features = ["can-panic", "test-utils"] }
+midnight-node-ledger-helpers = { git = "https://github.com/midnightntwrk/midnight-node.git", branch = "main", features = [
+  "can-panic",
+  "test-utils",
+] }
 
 # Subxt for node communication
 subxt = "0.44"

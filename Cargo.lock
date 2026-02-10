@@ -2408,6 +2408,7 @@ dependencies = [
 [[package]]
 name = "midnight-node-ledger-helpers"
 version = "0.1.0"
+source = "git+https://github.com/midnightntwrk/midnight-node.git?branch=main#56781edfe3f910f0625ccdac76b846bb378683b1"
 dependencies = [
  "async-trait",
  "bech32",
