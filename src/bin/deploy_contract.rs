@@ -6,14 +6,12 @@
 #[path = "../midnight.rs"]
 mod midnight;
 
-use midnight_node_ledger_helpers::*;
-use midnight_node_ledger_helpers::contract::{
-    ContractDeployInfo, MerkleTreeContract, BuildContractAction, 
-};
+use midnight_node_ledger_helpers::contract::{BuildContractAction, ContractDeployInfo};
 use midnight_node_ledger_helpers::wallet::UnshieldedWallet;
+use midnight_node_ledger_helpers::*;
 
-use std::sync::Arc;
 use std::marker::PhantomData;
+use std::sync::Arc;
 use subxt::backend::legacy::{rpc_methods::NumberOrHex, LegacyRpcMethods};
 use subxt::backend::rpc::RpcClient;
 
@@ -26,15 +24,174 @@ use midnight::api::runtime_types::pallet_timestamp::pallet::Call as TimestampCal
 // The event wrapper type
 use midnight::api::midnight_system::events::SystemTransactionApplied;
 
-// ─── Configuration ───────────────────────────────────────────────────────────
+use async_trait::async_trait;
+use std::any::Any;
+
+// ─── BBoard Contract Definition ──────────────────────────────────────────────
+
+use std::sync::OnceLock;
+
+// ─── BBoard Contract Definition ──────────────────────────────────────────────
+
+pub struct BBoardContract {
+    pub resolver: &'static Resolver,
+}
+
+static RESOLVER: OnceLock<Resolver> = OnceLock::new();
+
+fn get_resolver() -> &'static Resolver {
+    RESOLVER.get_or_init(|| {
+        Resolver::new(
+            PUBLIC_PARAMS.clone(),
+            DustResolver(
+                MidnightDataProvider::new(
+                    FetchMode::OnDemand,
+                    OutputMode::Log,
+                    DUST_EXPECTED_FILES.to_owned(),
+                )
+                .expect("Failed to create MidnightDataProvider"),
+            ),
+            Box::new(|_key_location| Box::pin(std::future::ready(Ok(None)))),
+        )
+    })
+}
+
+impl BBoardContract {
+    pub fn new() -> Self {
+        Self {
+            resolver: get_resolver(),
+        }
+    }
+}
+
+use midnight_node_ledger_helpers::{
+    deserialize,
+    storage::HashMap as HashMapStorage,
+    stval,
+    AlignedValue,
+    ChargedState,
+    Contract,
+    ContractAddress,
+    ContractCallPrototype,
+    ContractDeploy,
+    ContractMaintenanceAuthority,
+    ContractOperation,
+    ContractState,
+    LedgerContext,
+    Op,
+    ResultModeGather,
+    ResultModeVerify,
+    Sp,
+    StateValue,
+    Transcripts,
+    VerifierKey, // Import VerifierKey
+    DB,
+};
+
+#[async_trait]
+impl<D: DB + Clone> Contract<D> for BBoardContract {
+    async fn deploy(
+        &self,
+        committee: &[VerifyingKey],
+        committee_threshold: u32,
+        rng: &mut StdRng,
+    ) -> ContractDeploy<D> {
+        // Load verifier keys from files
+        // We assume we are running from project root
+        let load_vk = |name: &str| -> VerifierKey {
+            let path = format!("static/bboard/keys/{}.verifier", name);
+            let bytes =
+                std::fs::read(&path).unwrap_or_else(|e| panic!("Failed to read {}: {}", path, e));
+            deserialize(&mut bytes.as_slice()).expect("Failed to deserialize verifier key")
+        };
+
+        let post_vk = load_vk("post");
+        let take_down_vk = load_vk("takeDown");
+
+        let post_op = ContractOperation::new(Some(post_vk));
+        let take_down_op = ContractOperation::new(Some(take_down_vk));
+
+        // Initial state:
+        // state: State.VACANT (0)
+        // message: none<Opaque<"string">> (None)
+        // sequence: Counter(1) (1)
+        // owner: Bytes<32> (uninitialized? - let's assume default [0; 32] or similar.
+        // Based on Compact behavior, likely initialized to default if not set?
+        // Actually, in `test_utilities.rs` or `merkle_tree.rs`, they construct state explicitly.
+        // Let's assume it's just 4 fields)
+
+        let initial_state = stval!([
+            (0u64),      // state = VACANT
+            null,        // message = None
+            (1u64),      // sequence = 1
+            ([0u8; 32])  // owner = 32 bytes
+        ]);
+
+        let contract = ContractState {
+            data: ChargedState::new(initial_state),
+            operations: HashMapStorage::new()
+                .insert("post".as_bytes().into(), post_op)
+                .insert("takeDown".as_bytes().into(), take_down_op),
+            maintenance_authority: ContractMaintenanceAuthority {
+                committee: committee.to_vec(),
+                threshold: committee_threshold,
+                counter: 0,
+            },
+            balance: HashMapStorage::new(),
+        };
+
+        ContractDeploy::new(rng, contract)
+    }
+
+    fn resolver(&self) -> &'static Resolver {
+        self.resolver
+    }
+
+    // Stubs for other methods not strictly needed for DEPLOYMENT construction
+    // (We only need `deploy`. `contract_call` etc are for calling it)
+
+    fn transcript(
+        &self,
+        _key: &str,
+        _input: &Box<dyn Any + Send + Sync>,
+        _address: &ContractAddress,
+        _context: Arc<LedgerContext<D>>,
+    ) -> (AlignedValue, Vec<AlignedValue>, Vec<Transcripts<D>>) {
+        panic!("Not implemented: transcript (only deployment supported)")
+    }
+
+    fn operation(
+        &self,
+        _key: &str,
+        _address: &ContractAddress,
+        _context: Arc<LedgerContext<D>>,
+    ) -> Sp<ContractOperation, D> {
+        panic!("Not implemented: operation")
+    }
+
+    fn program_with_results(
+        _prog: &[Op<ResultModeGather, D>],
+        _results: &[AlignedValue],
+    ) -> Vec<Op<ResultModeVerify, D>> {
+        panic!("Not implemented: program_with_results")
+    }
+
+    fn contract_call(
+        &self,
+        _address: &ContractAddress,
+        _key: &'static str,
+        _input: &Box<dyn Any + Send + Sync>,
+        _rng: &mut StdRng,
+        _context: Arc<LedgerContext<D>>,
+    ) -> ContractCallPrototype<D> {
+        panic!("Not implemented: contract_call")
+    }
+}
 
 const NODE_URL: &str = "ws://localhost:9944";
 
 // Wallet seed (hex-encoded, 32 bytes)
-const WALLET_SEED_HEX: &str =
-    "0000000000000000000000000000000000000000000000000000000000000001";
-
-
+const WALLET_SEED_HEX: &str = "0000000000000000000000000000000000000000000000000000000000000001";
 
 // ─── Main ────────────────────────────────────────────────────────────────────
 
@@ -53,13 +210,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         }
     }
 
-    println!("=== Midnight Contract Deployment Builder ===\n");
+    println!("=== Midnight Contract Deployment Builder (BBoard) ===\n");
 
     // ── Step 1: Parse config ─────────────────────────────────────────────
-    let seed: WalletSeed = WALLET_SEED_HEX
-        .parse()
-        .expect("Invalid wallet seed hex");
-    
+    let seed: WalletSeed = WALLET_SEED_HEX.parse().expect("Invalid wallet seed hex");
+
     // We don't strictly need shielded token type for contract deploy if we don't handle inputs/outputs/change
     // but useful if we ever wanted to add fees payment from shielded inputs?
     // For now we use NO inputs/outputs in OfferInfo, so we leave it.
@@ -79,7 +234,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .runtime_api()
         .at_latest()
         .await?
-        .call(midnight::api::apis().midnight_runtime_api().get_network_id())
+        .call(
+            midnight::api::apis()
+                .midnight_runtime_api()
+                .get_network_id(),
+        )
         .await?;
     println!("✓ Network ID: {network_id}");
 
@@ -118,28 +277,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     timestamp_ms = Some(now);
                 }
                 RuntimeCall::Midnight(MidnightCall::send_mn_transaction { midnight_tx }) => {
-                    match deserialize::<FinalizedTransaction<DefaultDB>, _>(&mut midnight_tx.as_slice()) {
+                    match deserialize::<FinalizedTransaction<DefaultDB>, _>(
+                        &mut midnight_tx.as_slice(),
+                    ) {
                         Ok(tx) => txs.push(SerdeTransaction::Midnight(tx)),
-                        Err(e) => eprintln!("  ⚠ Block {block_num}: failed to deserialize mn tx: {e}"),
+                        Err(e) => {
+                            eprintln!("  ⚠ Block {block_num}: failed to deserialize mn tx: {e}")
+                        }
                     }
                 }
-                RuntimeCall::MidnightSystem(
-                    MidnightSystemCall::send_mn_system_transaction { midnight_system_tx },
-                ) if block_num == 0 => {
+                RuntimeCall::MidnightSystem(MidnightSystemCall::send_mn_system_transaction {
+                    midnight_system_tx,
+                }) if block_num == 0 => {
                     match deserialize::<SystemTransaction, _>(&mut midnight_system_tx.as_slice()) {
                         Ok(tx) => txs.push(SerdeTransaction::System(tx)),
-                        Err(e) => eprintln!("  ⚠ Block {block_num}: failed to deserialize system tx: {e}"),
+                        Err(e) => {
+                            eprintln!("  ⚠ Block {block_num}: failed to deserialize system tx: {e}")
+                        }
                     }
                 }
                 _ => {}
             }
 
             if block_num > 0 {
-                let ext_events = subxt::blocks::ExtrinsicEvents::new(
-                    ext.hash(),
-                    ext.index(),
-                    events.clone(),
-                );
+                let ext_events =
+                    subxt::blocks::ExtrinsicEvents::new(ext.hash(), ext.index(), events.clone());
                 for ev in ext_events.iter().filter_map(Result::ok) {
                     if let Ok(Some(event)) = ev.as_event::<SystemTransactionApplied>() {
                         let bytes = event.0.serialized_system_transaction;
@@ -172,16 +334,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     // The committee is the deployer (us)
     let committee_seed = seed;
-    let committee = vec![UnshieldedWallet::default(committee_seed).signing_key().verifying_key().clone()];
+    let committee = vec![UnshieldedWallet::default(committee_seed)
+        .signing_key()
+        .verifying_key()
+        .clone()];
     let committee_threshold = 1;
 
-    let deploy_contract: Box<dyn BuildContractAction<DefaultDB>> =
-        Box::new(ContractDeployInfo {
-            type_: MerkleTreeContract::new(),
-            committee,
-            committee_threshold,
-            _marker: PhantomData,
-        });
+    let deploy_contract: Box<dyn BuildContractAction<DefaultDB>> = Box::new(ContractDeployInfo {
+        type_: BBoardContract::new(),
+        committee,
+        committee_threshold,
+        _marker: PhantomData,
+    });
 
     let actions: Vec<Box<dyn BuildContractAction<DefaultDB>>> = vec![deploy_contract];
 
@@ -248,7 +412,10 @@ async fn submit_transaction(
     let progress = unsigned.submit_and_watch().await?;
 
     println!("✓ Transaction submitted!");
-    println!("  Extrinsic hash: 0x{}", hex::encode(progress.extrinsic_hash().0));
+    println!(
+        "  Extrinsic hash: 0x{}",
+        hex::encode(progress.extrinsic_hash().0)
+    );
     println!("  Waiting for finalization...\n");
 
     match progress.wait_for_finalized_success().await {

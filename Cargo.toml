@@ -15,4 +15,5 @@ subxt = "0.44"
 
 # Runtime
 tokio = { version = "1", features = ["full"] }
-hex = "0.4"
+hex = "0.4.3"
+async-trait = "0.1"
